@@ -1,9 +1,13 @@
-package main
+package lzr
 
 import (
+	"crypto/rand"
 	"crypto/tls"
+	"crypto/x509"
+	"errors"
 	"log"
 	"net"
+	"os"
 	"strings"
 )
 
@@ -12,6 +16,7 @@ func getHostNames(ip string) []string {
 
 	if err != nil {
 		log.Printf("While getting hostname for %s (tls_connect.go), error: %s", ip, err)
+		return []string{}
 	}
 
 	for _, name := range hostnames {
@@ -54,6 +59,51 @@ func connectTLS(host string) *tls.Conn {
 	}
 
 	return conn
+}
+
+func generatePrivateKey(certPath string) ([]byte, error) {
+	// use provided certificates, get private key
+
+	rawCert, err := os.ReadFile(certPath)
+	if err != nil {
+		log.Printf("failed to get certificate from: %s", certPath)
+		return nil, err
+	}
+
+	block, _ := pem.Decode(rawCert)
+	if block == nil || block.Type != "CERTIFICATE" {
+		log.Printf("bad certificate")
+		return nil, errors.New("Bad certificate in buildClientHello")
+	}
+
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		log.Printf("Could not parse certificate")
+		return nil, err
+	}
+
+	curve := pubKey.Curve
+	key, err := ecdsa.GenerateKey(curve, nil)
+	if err != nil {
+		log.Printf("Could not generate ecdsa key")
+		return nil, err
+	}
+
+	return key, nil
+
+}
+
+func buildClientHello() []byte {
+
+	data := []byte("\x16\x03\x01\x00\x75\x01\x00\x00\x71\x03\x03") // tls header
+
+	token := make([]byte, 32)
+	token := rand.Read(token) // using crypto/rand for csrng
+	data2 := []byte("\x00\x00\x1a\xc0\x2f\xc0\x2b\xc0\x11\xc0\x07\xc0\x13\xc0\x09\xc0\x14\xc0\x0a\x00\x05\x00\x2f\x00\x35\xc0\x12\x00\x0a\x01\x00\x00\x2e\x00\x05\x00\x05\x01\x00\x00\x00\x00\x00\x0a\x00\x08\x00\x06\x00\x17\x00\x18\x00\x19\x00\x0b\x00\x02\x01\x00\x00\x0d\x00\x0a\x00\x08\x04\x01\x04\x03\x02\x01\x02\x03\xff\x01\x00\x01\x00")
+	data = append(data, token...)
+	data = append(data, data2...)
+	return data
+
 }
 
 func main() {
