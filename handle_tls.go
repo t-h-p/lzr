@@ -1,16 +1,18 @@
 package lzr
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
-	"crypto/curve25519"
 	"encoding/binary"
 	"errors"
 	"log"
 	"net"
-	"os"
 	"strings"
+
+	"golang.org/x/crypto/curve25519" // needs 'go get golang.org/x/crypto/curve25519' to work
 )
 
 func getHostNames(ip string) []string {
@@ -65,31 +67,19 @@ func connectTLS(host string) *tls.Conn {
 
 func generatePrivateKey(certPath string) ([]byte, error) {
 
-	// use provided certificates, get private key
+	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 
-	rawCert, err := os.ReadFile(certPath)
-	if err != nil {
-		log.Printf("failed to get certificate from: %s", certPath)
-		return nil, err
-	}
-
-	block, _ := pem.Decode(rawCert)
-	if block == nil || block.Type != "CERTIFICATE" {
-		return nil, errors.New("Bad certificate provided")
-	}
-
-	cert, err := x509.ParseCertificate(block.Bytes)
 	if err != nil {
 		return nil, err
 	}
 
-	curve := pubKey.curve
-	key, err := ecdsa.GenerateKey(curve, nil)
+	privateKeyAsBytes, err := x509.MarshalECPrivateKey(privateKey)
+
 	if err != nil {
 		return nil, err
 	}
 
-	return key, nil
+	return privateKeyAsBytes, nil
 
 }
 
@@ -100,12 +90,14 @@ func generatePublicKey(privateKey []byte) []byte {
 	privateKey[0] &= 127
 	privateKey[0] |= 64
 
-	var publicKey [32]byte = curve25519.ScalarBaseMult(&publicKey, &privateKey)
+	var fixedPrivateKey [32]byte = [32]byte(privateKey)
+	var publicKey [32]byte
+	curve25519.ScalarBaseMult(&publicKey, &fixedPrivateKey)
 
-	return publicKey
+	return publicKey[:]
 }
 
-func buildClientHello(name string, privateKey []byte) ([]byte, err) {
+func buildClientHello(name string, privateKey []byte) ([]byte, error) {
 
 	/* https://tls13.xargs.org/#client-hello/annotated */
 	/* Must provide some kind of valid hostname for this to work */
@@ -113,29 +105,28 @@ func buildClientHello(name string, privateKey []byte) ([]byte, err) {
 	clientHello := []byte("\x16\x03\x01")
 
 	messageLength := make([]byte, 2)
-	if (len(name) <= 253) {
-		binary.BigEndian.PutUint16(messageLength, len(name))
+	if len(name) <= 253 {
+		binary.BigEndian.PutUint16(messageLength, uint16(len(name)))
 	} else {
 		return nil, errors.New("Invalid hostname format")
 	}
-	clientHello = append(clientHello, messageLength)
+	clientHello = append(clientHello, messageLength...)
 
 	handshakeHeaderAndVersion := ("\x01\x00\x00\xf4\x03\x03")
-	clientHello = append(clientHello, handshakeHeaderAndVersion)
+	clientHello = append(clientHello, handshakeHeaderAndVersion...)
 
 	randomToken := make([]byte, 32)
-	randomToken := rand.Read(token) // using crypto/rand for csrng
-	clientHello = append(clientHello, token...)
+	rand.Read(randomToken) // using crypto/rand for csrng
+	clientHello = append(clientHello, randomToken...)
 
 	middleBytes := []byte("\x00\x08\x13\x02\x13\x03\x13\x01\x00\xff\x01\x00\x00\xa3\x00\x00\x00\x18\x00\x16\x00\x00\x13\x65\x78\x61\x6d\x70\x6c\x65\x2e\x75\x6c\x66\x68\x65\x69\x6d\x2e\x6e\x65\x74\x00\x0b\x00\x04\x03\x00\x01\x02\x00\x0a\x00\x16\x00\x14\x00\x1d\x00\x17\x00\x1e\x00\x19\x00\x18\x01\x00\x01\x01\x01\x02\x01\x03\x01\x04\x00\x23\x00\x00\x00\x16\x00\x00\x00\x17\x00\x00\x00\x0d\x00\x1e\x00\x1c\x04\x03\x05\x03\x06\x03\x08\x07\x08\x08\x08\x09\x08\x0a\x08\x0b\x08\x04\x08\x05\x08\x06\x04\x01\x05\x01\x06\x01\x00\x2b\x00\x03\x02\x03\x04\x00\x2d\x00\x02\x01\x01")
-	clientHello = append(clientHello, middleBytes)
+	clientHello = append(clientHello, middleBytes...)
 
 	publicKey := generatePublicKey(privateKey)
-	clientHello = append(clientHello, publicKey)
+	clientHello = append(clientHello, publicKey...)
 
 	return clientHello, nil
 }
-
 
 func main() {
 	log.Printf("start")
