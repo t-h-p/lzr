@@ -1,18 +1,11 @@
 package lzr
 
 import (
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
-	"crypto/tls"
-	"crypto/x509"
-	"encoding/binary"
-	"errors"
 	"log"
 	"net"
 	"strings"
 
-	"golang.org/x/crypto/curve25519" // needs "go get golang.org/x/crypto/curve25519" to work
+	"github.com/zmap/zcrypto/tls"
 )
 
 func getHostNames(ip string) []string {
@@ -40,110 +33,58 @@ func getHost(ip string) string {
 	return hostname
 }
 
-func connectTLS(host string) *tls.Conn {
+func IsTLSVersion2(serverHello []byte) bool {
 
-	// Can enable if we don't care about security
-	/*config := &tls.Config{
-		InsecureSkipVerify: false,
-	}*/
-	config := &tls.Config{}
-
-	conn, err := tls.Dial("tcp", host, config)
-
-	if err != nil {
-		log.Printf("While dialing TLS connection for %s (tls_connect.go), error: %s", host, err)
-		errVal := err.Error()
-		// example error (solution below only resolves this specific kind of error)
-		// tls: failed to verify certificate: x509: certificate is valid for pkg.go.dev, not 181.140.149.34.bc.googleusercontent.com.
-		parts := strings.Split(errVal, " ")
-		// Debug
-		/*for i := 0; i < len(parts); i++ {
-			log.Printf("%s : %s", i, parts[i])
-		}*/
-		newHost := parts[10][:len(parts[10])-1]
-		// Check "correct" hostname
-		// log.Printf(newHost)
-		// two layers of tls.Dial
-		conn, err := tls.Dial("tcp", newHost+":443", config)
-		if err != nil {
-			log.Printf("While dialing TLS connection for %s (tls_connect.go, depth 2), error: %s", newHost, err)
-			return nil
-		}
-		return conn
+	if len(serverHello) < 6 {
+		return false
 	}
 
-	return conn
+	return serverHello[1] == 0x03 && serverHello[2] == 0x03
 }
 
-// Creates an X509 private key provided path to a certificate file.
-func generatePrivateKey() ([]byte, error) {
-
-	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-
-	if err != nil {
-		return nil, err
+// Read ServerHello bytes to find supported application layer protocl
+func GetALPN(serverhello string) string {
+	// Possibly could change this later to check for all protocols and return
+	// an array of protocol strings
+	if strings.Contains(serverhello, string([]byte{0x02, 0x68, 0x32})) {
+		return "h2"
+	}
+	if strings.Contains(serverhello, string([]byte{0x08, 0x68, 0x74, 0x74, 0x70, 0x2f, 0x31, 0x2e, 0x31})) {
+		return "http/1.1"
+	}
+	if strings.Contains(serverhello, string([]byte{0x03, 0x68, 0x32, 0x63})) {
+		return "h2c"
+	}
+	if strings.Contains(serverhello, string([]byte{0x02, 0x68, 0x33})) {
+		return "h3"
+	}
+	if strings.Contains(serverhello, string([]byte{0x06, 0x77, 0x65, 0x62, 0x72, 0x74, 0x63})) {
+		return "webrtc"
+	}
+	if strings.Contains(serverhello, string([]byte{0x08, 0x68, 0x74, 0x74, 0x70, 0x2f, 0x31, 0x2e, 0x30})) {
+		return "http/1.0"
+	}
+	if strings.Contains(serverhello, string([]byte{0x08, 0x68, 0x74, 0x74, 0x70, 0x2f, 0x30, 0x2e, 0x39})) {
+		return "http/0.9"
+	}
+	if strings.Contains(serverhello, string([]byte{0x03, 0x66, 0x74, 0x70})) {
+		return "ftp"
+	}
+	if strings.Contains(serverhello, string([]byte{0x04, 0x69, 0x6d, 0x61, 0x70})) {
+		return "imap"
+	}
+	if strings.Contains(serverhello, string([]byte{0x04, 0x70, 0x6f, 0x70, 0x33})) {
+		return "pop3"
+	}
+	if strings.Contains(serverhello, string([]byte{0x03, 0x73, 0x6D, 0x62})) {
+		return "smb"
+	}
+	if strings.Contains(serverhello, string([]byte{0x10, 0x70, 0x6F, 0x73, 0x74, 0x67, 0x72, 0x65, 0x73, 0x71, 0x6C})) {
+		return "postgresql"
+	}
+	if strings.Contains(serverhello, string([]byte{0x04, 0x6d, 0x71, 0x74, 0x74})) {
+		return "mqtt"
 	}
 
-	privateKeyAsBytes, err := x509.MarshalECPrivateKey(privateKey)
-
-	if err != nil {
-		return nil, err
-	}
-
-	return privateKeyAsBytes, nil
-
-}
-
-// Creates a public key using Curve25519.
-func generatePublicKey(privateKey []byte) []byte {
-
-	// Clamp
-	privateKey[0] &= 248
-	privateKey[0] &= 127
-	privateKey[0] |= 64
-
-	var fixedPrivateKey [32]byte = [32]byte(privateKey)
-	var publicKey [32]byte
-	curve25519.ScalarBaseMult(&publicKey, &fixedPrivateKey)
-
-	return publicKey[:]
-}
-
-func buildClientHello(hostname string, privateKey []byte) ([]byte, error) {
-
-	/* https://tls13.xargs.org/#client-hello/annotated */
-	/* Must provide some kind of valid hostname for this to work */
-
-	clientHello := []byte("\x16\x03\x01")
-
-	messageLength := make([]byte, 2)
-	if len(hostname) <= 253 {
-		binary.BigEndian.PutUint16(messageLength, uint16(len(hostname)))
-	} else {
-		return nil, errors.New("invalid hostname format")
-	}
-	clientHello = append(clientHello, messageLength...)
-
-	handshakeHeaderAndVersion := ("\x01\x00\x00\xf4\x03\x03")
-	clientHello = append(clientHello, handshakeHeaderAndVersion...)
-
-	randomToken := make([]byte, 32)
-	rand.Read(randomToken) // using crypto/rand for csrng
-	clientHello = append(clientHello, randomToken...)
-
-	middleBytes := []byte("\x00\x08\x13\x02\x13\x03\x13\x01\x00\xff\x01\x00\x00\xa3\x00\x00\x00\x18\x00\x16\x00\x00\x13\x65\x78\x61\x6d\x70\x6c\x65\x2e\x75\x6c\x66\x68\x65\x69\x6d\x2e\x6e\x65\x74\x00\x0b\x00\x04\x03\x00\x01\x02\x00\x0a\x00\x16\x00\x14\x00\x1d\x00\x17\x00\x1e\x00\x19\x00\x18\x01\x00\x01\x01\x01\x02\x01\x03\x01\x04\x00\x23\x00\x00\x00\x16\x00\x00\x00\x17\x00\x00\x00\x0d\x00\x1e\x00\x1c\x04\x03\x05\x03\x06\x03\x08\x07\x08\x08\x08\x09\x08\x0a\x08\x0b\x08\x04\x08\x05\x08\x06\x04\x01\x05\x01\x06\x01\x00\x2b\x00\x03\x02\x03\x04\x00\x2d\x00\x02\x01\x01")
-	clientHello = append(clientHello, middleBytes...)
-
-	publicKey := generatePublicKey(privateKey)
-	clientHello = append(clientHello, publicKey...)
-
-	return clientHello, nil
-}
-
-func BuildClientHello(ip string) ([]byte, error) {
-	key, err := generatePrivateKey()
-	if err != nil {
-		return nil, err
-	}
-	return buildClientHello(getHost(ip), key)
+	return ""
 }
